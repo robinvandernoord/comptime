@@ -1,3 +1,4 @@
+import comptime
 from comptime import comptime
 from .secondary import add
 

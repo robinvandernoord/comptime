@@ -2,17 +2,16 @@
 Logic for the compilation step of comptime.
 """
 
-import ast
 import contextlib
 import os
 import sys
 import textwrap
 import typing
-from ast import NodeTransformer, fix_missing_locations, parse
 from pathlib import Path
 
 import black
 import black.mode
+from redbaron import RedBaron, Node, DecoratorNode
 
 from .core import ENV_KEY
 from .types import DynamicTuple, Registration, ResultsDictType
@@ -122,215 +121,95 @@ def precompute(contents: str, full_module_name: str, package_name: str = None) -
     return results
 
 
-Node: typing.TypeAlias = ast.AST
-
-
-class TransformComptime(NodeTransformer):
+class TransformComptimeRedBaron:
     """
-    AST manipulator.
+    RedBaron-based code manipulator.
     """
 
-    replacements: ResultsDictType
-
-    def __init__(self, replacements: ResultsDictType) -> None:
-        """
-        Store the possible replacements for easier access.
-        """
+    def __init__(self, code, replacements):
+        self.red = RedBaron(code)
         self.replacements = replacements
 
-    def check_comptime_decorator(self, node: ast.FunctionDef) -> bool:
-        """
-        Check if a function has @comptime.
+    def has_comptime_decorator(self, func_node: Node) -> bool:
+        return any("comptime" in decorator.dumps() for decorator in func_node.decorators)
 
-        If it does, remove it.
-        Returns whether it did.
-        """
-        has_comptime_decorator = any(
-            (isinstance(deco, ast.Call) and getattr(deco.func, "id", "") == "comptime")
-            or (isinstance(deco, ast.Name) and deco.id == "comptime")
-            for deco in node.decorator_list
-        )
+    def is_comptime_import(self, node) -> bool:
+        if node.type == "import" and any(
+            alias.startswith("comptime.") or alias == "comptime" for alias in node.names()
+        ):
+            return True
+        elif node.type == "from_import" and node.value[0].value == "comptime":
+            return True
+        return False
 
+    def remove_comptime_decorators(self, node: Node):
         # Remove the @comptime decorator(s) if present
-        node.decorator_list = [
-            deco
-            for deco in node.decorator_list
-            if not (
-                # Check for @comptime
-                (isinstance(deco, ast.Name) and deco.id == "comptime")
-                or
-                # Check for @comptime.*
-                (isinstance(deco, ast.Attribute) and getattr(deco.value, "id", "") == "comptime")
-                or
-                # Check for @comptime() or @comptime.*()
-                (
-                    isinstance(deco, ast.Call)
-                    and (
-                        getattr(deco.func, "id", "") == "comptime"
-                        or (isinstance(deco.func, ast.Attribute) and getattr(deco.func.value, "id", "") == "comptime")
-                    )
-                )
-            )
-        ]
-        return has_comptime_decorator
+        decos: list[DecoratorNode] = node.decorators
 
-    def get_docstring(self, node: ast.FunctionDef) -> ast.Expr | None:
-        """
-        Get the docstring (object) of a function node.
-        """
-        first_expr = typing.cast(ast.Expr, node.body[0])  # it probably is and we check it afterwards:
-        if isinstance(first_expr, ast.Expr) and isinstance(first_expr.value, ast.Str):
-            return first_expr
-        return None
+        for decorator in decos:
+            if str(decorator.name) == "comptime":
+                decos.remove(decorator)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
-        """
-        Check each function and replace its contents if it has the @comptime decorator.
-        """
-        # Check if the function has the @comptime decorator
-        has_comptime_decorator = self.check_comptime_decorator(node)
+    def remove_node(self, node):
+        index = node.index_on_parent
+        self.red.node_list.remove(node)
+        # Remove preceding newline if it exists
+        if index > 0 and self.red.node_list[index - 1].type == "endl":
+            self.red.node_list.remove(self.red.node_list[index - 1])
+        # Remove succeeding newline if it exists
+        elif index < len(self.red.node_list) and self.red.node_list[index].type == "endl":
+            self.red.node_list.remove(self.red.node_list[index])
 
-        # If the function does not have the @comptime decorator, do not modify it
-        if not has_comptime_decorator:
-            return node
-
-        # Preserve the docstring if it exists
-        docstring_node = self.get_docstring(node)
-
-        function_name = node.name
-        arg_names = [arg.arg for arg in node.args.args]
-
-        if any(isinstance(key, tuple) and key[0] == function_name for key in self.replacements):
-            self._generate_comptime_match_cases_and_annotations(arg_names, function_name, node)
-        else:
-            # If the function does not have arguments, simply replace its body with the return statement
-            node.body = [ast.Return(value=ast.Constant(self.replacements[function_name]))]
-
-        # Add back the docstring if it was present
-        if docstring_node:
-            node.body.insert(0, docstring_node)
-        return node
-
-    def _generate_comptime_match_cases_and_annotations(
-        self, arg_names: list[str], function_name: str, node: ast.FunctionDef
-    ) -> None:
-        cases, literals = self._build_match_cases(function_name, arg_names)
-        self._build_argument_annotations(node, arg_names, literals)
-
-        # Replacing the body with the match block
-        match_subjects = [ast.Name(arg_name, ast.Load()) for arg_name in arg_names]
-        node.body = [
-            ast.Match(
-                subject=ast.Tuple(elts=match_subjects, ctx=ast.Load())
-                if len(match_subjects) > 1
-                else match_subjects[0],
-                cases=cases,
-            )
-        ]
-
-    def _build_argument_annotations(
-        self, node: ast.FunctionDef, arg_names: list[str], literals_map: dict[str, set[typing.Any]]
-    ) -> None:
-        for idx, arg_name in enumerate(arg_names):
-            literals = [ast.Constant(value=literal) for literal in literals_map[arg_name]]
-            if set(literals_map[arg_name]) == {True, False}:
-                node.args.args[idx].annotation = ast.Name("bool", ast.Load())
-            else:
-                node.args.args[idx].annotation = ast.Subscript(
-                    value=ast.Name("typing.Literal", ast.Load()),
-                    slice=ast.Index(value=ast.Tuple(elts=literals, ctx=ast.Load())),
-                    ctx=ast.Load(),
-                )
-
-    def _build_match_cases(
-        self, function_name: str, arg_names: list[str]
-    ) -> tuple[list[ast.match_case], dict[str, set[typing.Any]]]:
-        literals_map: dict[str, set[typing.Any]] = {arg_name: set() for arg_name in arg_names}
-        cases = []
-        for key, value in self.replacements.items():
-            if isinstance(key, tuple) and key[0] == function_name:
-                if isinstance(key[1], tuple):
-                    for idx, literal_value in enumerate(key[1]):
-                        literals_map[arg_names[idx]].add(literal_value)
-                else:
-                    literals_map[arg_names[0]].add(key[1])
-
-                # Adding the match cases
-                patterns = (
-                    [ast.MatchValue(value=ast.Constant(value=literal)) for literal in key[1]]
-                    if isinstance(key[1], tuple)
-                    else [ast.MatchValue(value=ast.Constant(value=key[1]))]
-                )
-
-                pattern: ast.MatchValue | ast.Tuple = (
-                    ast.Tuple(elts=patterns, ctx=ast.Load()) if len(patterns) > 1 else patterns[0]
-                )
-
-                cases.append(ast.match_case(pattern=pattern, body=[ast.Return(value=ast.Constant(value))]))
-
-        # Adding the default match case
-        self._add_fallback_case(arg_names, cases)
-        return cases, literals_map
-
-    def _add_fallback_case(self, arg_names: list[str], cases: list[ast.match_case]) -> None:
-        args_fstring_elements: list[ast.Str | ast.FormattedValue] = []
-        for arg_name in arg_names:
-            args_fstring_elements.extend(
-                (
-                    ast.Str(f"{arg_name}="),
-                    ast.FormattedValue(
-                        value=ast.Name(arg_name, ast.Load()),
-                        conversion=-1,
-                        format_spec=None,
-                    ),
-                    ast.Str(" "),
-                )
-            )
-        # Removing the trailing space
-        args_fstring_elements = args_fstring_elements[:-1]
-        error_message = ast.JoinedStr(values=[ast.Str("Uncompiled variant "), *args_fstring_elements])
-        cases.append(
-            ast.match_case(
-                pattern=ast.MatchAs(name=None),
-                body=[
-                    ast.Raise(exc=ast.Call(func=ast.Name("ValueError", ast.Load()), args=[error_message], keywords=[]))
-                ],
-            )
+    def add_typing_import(self):
+        red = self.red
+        # Check if "import typing" is already present
+        import_typing_exists = any(
+            isinstance(node, RedBaron) and node.dumps() == "import typing" for node in red.find_all("ImportNode")
         )
 
-    def visit_Import(self, node: ast.Import) -> ast.Import | None:
-        """
-        Remove the import statement if it imports comptime.
-        """
-        if any(alias.name == "comptime" for alias in node.names):
-            return None
-        return node
+        # If not present, add it at the start of the imports
+        if not import_typing_exists:
+            if docstring := red.find("StringNode", recursive=False):
+                position = docstring.index_on_parent + 1
+            else:
+                position = 0
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> ast.ImportFrom | None:
-        """
-        Remove the from import statement if it imports comptime.
-        """
-        if node.module == "comptime":
-            return None
-        return node
+            if imports := red.find_all("ImportNode", recursive=False):
+                position = imports[0].index_on_parent
+
+            red.insert(position, "import typing")
+
+    def walk_nodelist(self):
+        nodes_to_remove = []
+        for node in self.red.node_list:
+            if self.is_comptime_import(node):
+                nodes_to_remove.append(node)
+            elif node.type in ["def", "async_def"]:
+                self.remove_comptime_decorators(node)
+
+        for node in nodes_to_remove:
+            self.remove_node(node)
+
+    def transform_functions(self):
+        for func_node in self.red.find_all("DefNode"):
+            if not self.has_comptime_decorator(func_node):
+                continue
+            function_name = func_node.name
+            if function_name in self.replacements:
+                # Replace the function content as per your logic
+                # You can make use of self.replacements[function_name]
+                pass
+            # Extend with other transformations...
 
 
-def transform_code(code: str, replacements: ResultsDictType) -> str:
-    """
-    Given the orginal code and output of comptime functions, inline the results.
-    """
-    tree = parse(code)
-    transformer = TransformComptime(replacements)
-    new_tree = fix_missing_locations(transformer.visit(tree))
+def transform_code(code, replacements):
+    transformer = TransformComptimeRedBaron(code, replacements)
 
-    # Adding the typing import if not already present
-    for stmt in new_tree.body:
-        if isinstance(stmt, ast.Import) and any(alias.name == "typing" for alias in stmt.names):
-            break
-    else:
-        new_tree.body.insert(0, ast.Import(names=[ast.alias(name="typing", asname=None)]))
+    transformer.add_typing_import()
+    transformer.walk_nodelist()
+    transformer.transform_functions()
 
-    return ast.unparse(new_tree)
+    return transformer.red.dumps()
 
 
 def do_compilation(file: str | Path, has_absolute_imports: bool = None, with_black: bool = True) -> str:

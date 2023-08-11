@@ -1,3 +1,8 @@
+import comptime
+import datetime
+from comptime.core import IS_COMPTIME_CONTEXT
+from functools import lru_cache
+import comptime.core
 from comptime import comptime
 
 # from .secondary import add
@@ -5,6 +10,7 @@ from secondary import add
 
 
 @comptime.skip
+@lru_cache
 def side_effect(arg):
     print("SIDE-EFFECT", arg)
 
@@ -15,6 +21,7 @@ def side_effect2():
 
 
 @comptime
+@lru_cache
 def expensive_computation() -> int:
     """
     Really expensive
