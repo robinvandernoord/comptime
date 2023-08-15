@@ -1,12 +1,16 @@
 import typing
+
+# from .secondary import add
 from secondary import add
 
 
 def side_effect(arg):
+    # this has a side effect.
     print("SIDE-EFFECT", arg)
 
 
 def side_effect2():
+    # this has a side effect too
     print("SIDE-EFFECT", "second side effect")
 
 
@@ -17,7 +21,7 @@ def expensive_computation() -> int:
     return 5
 
 
-def with_predefined_arg(arg1: typing.Literal["second", "first"]) -> str:
+def with_predefined_arg(arg1: typing.Literal["first", "second"]) -> str:
     """
     Amazing!
     """
@@ -30,9 +34,7 @@ def with_predefined_arg(arg1: typing.Literal["second", "first"]) -> str:
             raise ValueError(f"Uncompiled variant arg1={arg1}")
 
 
-def multiple1(
-    string: typing.Literal["value1", "value2"], number: typing.Literal[2,]
-) -> str:
+def multiple1(string: typing.Literal["value2", "value1"], number: typing.Literal[2,]) -> str:
     match (string, number):
         case ("value1", 2):
             return "value1value1"
@@ -42,7 +44,7 @@ def multiple1(
             raise ValueError(f"Uncompiled variant string={string} number={number}")
 
 
-def multiple2(string: typing.Literal["value1", "value2"], verbose: bool) -> str:
+def multiple2(string: typing.Literal["value2", "value1"], verbose: bool) -> str:
     match (string, verbose):
         case ("value1", True):
             return "value1"
@@ -61,9 +63,8 @@ def main():
     side_effect("main")
     print(expensive_computation())
     print(with_predefined_arg("first"))
-    print(with_predefined_arg("third"))
+    print(with_predefined_arg("third"))  # -> ValueError
 
 
 if __name__ == "__main__":
     main()
-

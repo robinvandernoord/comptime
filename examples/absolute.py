@@ -6,11 +6,13 @@ from secondary import add
 
 @comptime.skip
 def side_effect(arg):
+    # this has a side effect.
     print("SIDE-EFFECT", arg)
 
 
 @comptime.skip()
 def side_effect2():
+    # this has a side effect too
     print("SIDE-EFFECT", "second side effect")
 
 
@@ -19,6 +21,7 @@ def expensive_computation() -> int:
     """
     Really expensive
     """
+    # DONT RUN THESE TWO AT COMPTIME: !!
     side_effect("expensive_computation")
     side_effect2()
     return add(2, 3)

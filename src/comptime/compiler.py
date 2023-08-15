@@ -8,7 +8,8 @@ import os
 import sys
 import textwrap
 import typing
-from ast import NodeTransformer, fix_missing_locations, parse
+from ast import NodeTransformer, fix_missing_locations
+from ast_comments import parse, unparse
 from pathlib import Path
 
 import black
@@ -330,7 +331,7 @@ def transform_code(code: str, replacements: ResultsDictType) -> str:
     else:
         new_tree.body.insert(0, ast.Import(names=[ast.alias(name="typing", asname=None)]))
 
-    return ast.unparse(new_tree)
+    return unparse(new_tree)
 
 
 def do_compilation(file: str | Path, has_absolute_imports: bool = None, with_black: bool = True) -> str:
