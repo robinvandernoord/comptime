@@ -35,9 +35,9 @@ def with_predefined_arg(arg1) -> str:
     side_effect("with_predefined_arg")
 
     if arg1 == "first":
-        return "1"
+        return str(1 ** 1000)
     else:
-        return "2"
+        return str(2 ** 2000)
 
 
 @comptime(("value1", "value2"), 2)
@@ -54,6 +54,14 @@ def main():
     print("Don't touch this code!")
     side_effect("main")
     print(expensive_computation())
+
+    print(
+        multiple1("value1", 2)
+    )
+
+    print(
+        multiple2("value1", False)
+    )
 
     print(with_predefined_arg("first"))
 

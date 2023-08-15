@@ -8,14 +8,8 @@ def expensive_computation():
     return 5
 
 
-def with_predefined_arg(arg1: typing.Literal["first", "second"]):
-    match arg1:
-        case "first":
-            return "1"
-        case "second":
-            return "2"
-        case _:
-            raise ValueError(f"Uncompiled variant arg1={arg1}")
+def with_predefined_arg(arg1: typing.Literal["second", "first"]):
+    return {"first": "1", "second": "2"}[arg1]
 
 
 def main():
@@ -27,3 +21,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -125,6 +125,10 @@ def precompute(contents: str, full_module_name: str, package_name: str = None) -
 
 Node: typing.TypeAlias = ast.AST
 
+Strategy = typing.Literal["match", "dict"]
+# DEFAULT_STRATEGY = "match"
+DEFAULT_STRATEGY = "dict"
+
 
 class TransformComptime(NodeTransformer):
     """
@@ -133,11 +137,12 @@ class TransformComptime(NodeTransformer):
 
     replacements: ResultsDictType
 
-    def __init__(self, replacements: ResultsDictType) -> None:
+    def __init__(self, replacements: ResultsDictType, strategy: Strategy = DEFAULT_STRATEGY) -> None:
         """
         Store the possible replacements for easier access.
         """
         self.replacements = replacements
+        self.strategy = strategy
 
     def check_comptime_decorator(self, node: ast.FunctionDef) -> bool:
         """
@@ -202,7 +207,14 @@ class TransformComptime(NodeTransformer):
         arg_names = [arg.arg for arg in node.args.args]
 
         if any(isinstance(key, tuple) and key[0] == function_name for key in self.replacements):
-            self._generate_comptime_match_cases_and_annotations(arg_names, function_name, node)
+            # todo: maybe fallback to original code if nothing found, unless specified in args by user?
+
+            if self.strategy == "match":
+                self._generate_comptime_match_cases_and_annotations(arg_names, function_name, node)
+            elif self.strategy == "dict":
+                self._generate_comptime_lookup_return(arg_names, function_name, node)
+            else:
+                raise ValueError(f"Invalid strategy '{self.strategy}'.")
         else:
             # If the function does not have arguments, simply replace its body with the return statement
             node.body = [ast.Return(value=ast.Constant(self.replacements[function_name]))]
@@ -227,6 +239,33 @@ class TransformComptime(NodeTransformer):
                 else match_subjects[0],
                 cases=cases,
             )
+        ]
+
+    def _generate_comptime_lookup_return(
+        self, arg_names: list[str], function_name: str, node: ast.FunctionDef
+    ) -> None:
+        lookup_dict, literals = self._build_lookup_dict(function_name, arg_names)
+        self._build_argument_annotations(node, arg_names, literals)
+
+        # Convert lookup_dict to an ast.Dict object
+        dict_keys = [ast.Tuple(elts=[ast.Constant(value=k) for k in key], ctx=ast.Load()) if isinstance(key,
+                                                                                                        tuple) else ast.Constant(
+            value=key) for key in lookup_dict.keys()]
+        dict_values = [ast.Constant(value=v) for v in lookup_dict.values()]
+        ast_lookup_dict = ast.Dict(keys=dict_keys, values=dict_values)
+
+        # Using dictionary lookup to replace the body
+        keys = [ast.Name(arg_name, ast.Load()) for arg_name in arg_names]
+        lookup_key = ast.Tuple(elts=keys, ctx=ast.Load()) if len(keys) > 1 else keys[0]
+
+        lookup_expression = ast.Subscript(
+            value=ast_lookup_dict,
+            slice=ast.Index(value=lookup_key),
+            ctx=ast.Load(),
+        )
+
+        node.body = [
+            ast.Return(value=lookup_expression)
         ]
 
     def _build_argument_annotations(
@@ -299,6 +338,24 @@ class TransformComptime(NodeTransformer):
             )
         )
 
+    def _build_lookup_dict(
+        self, function_name: str, arg_names: list[str]
+    ) -> dict[str, set[typing.Any]]:
+        literals_map: dict[str, set[typing.Any]] = {arg_name: set() for arg_name in arg_names}
+        lookup_dict = {}
+
+        for key, value in self.replacements.items():
+            if isinstance(key, tuple) and key[0] == function_name:
+                literals = key[1] if isinstance(key[1], tuple) else (key[1],)
+                for idx, literal_value in enumerate(literals):
+                    literals_map[arg_names[idx]].add(literal_value)
+
+                # Populating the lookup dictionary
+                lookup_key = tuple(literals) if len(literals) > 1 else literals[0]
+                lookup_dict[lookup_key] = value
+
+        return lookup_dict, literals_map
+
     def visit_Import(self, node: ast.Import) -> ast.Import | None:
         """
         Remove the import statement if it imports comptime.
@@ -316,12 +373,12 @@ class TransformComptime(NodeTransformer):
         return node
 
 
-def transform_code(code: str, replacements: ResultsDictType) -> str:
+def transform_code(code: str, replacements: ResultsDictType, strategy: Strategy = DEFAULT_STRATEGY) -> str:
     """
     Given the orginal code and output of comptime functions, inline the results.
     """
     tree = parse(code)
-    transformer = TransformComptime(replacements)
+    transformer = TransformComptime(replacements, strategy=strategy)
     new_tree = fix_missing_locations(transformer.visit(tree))
 
     # Adding the typing import if not already present
@@ -334,7 +391,8 @@ def transform_code(code: str, replacements: ResultsDictType) -> str:
     return unparse(new_tree)
 
 
-def do_compilation(file: str | Path, has_absolute_imports: bool = None, with_black: bool = True) -> str:
+def do_compilation(file: str | Path, has_absolute_imports: bool = None, with_black: bool = True,
+                   strategy: Strategy = DEFAULT_STRATEGY) -> str:
     """
     Execute @comptime code and replace the functions with its output.
     """
@@ -343,17 +401,18 @@ def do_compilation(file: str | Path, has_absolute_imports: bool = None, with_bla
     module_details = extract_module_details(file, has_absolute_imports)
     results = precompute(*module_details)
     code = module_details[0]
-    new_code = transform_code(code, results)
+    new_code = transform_code(code, results, strategy=strategy)
     if with_black:
         new_code = black.format_str(new_code, mode=BlackMode)
     return new_code
 
 
-def write(file: str | Path, has_absolute_imports: bool = None, output: str = None, with_black: bool = True) -> None:
+def write(file: str | Path, has_absolute_imports: bool = None, output: str | Path = None, with_black: bool = True,
+          strategy: Strategy = DEFAULT_STRATEGY) -> None:
     """
     Compile `file` and write the outputs to `output`, or myfile.py -> myfile_compiled.py.
     """
-    new_code = do_compilation(file, has_absolute_imports=has_absolute_imports, with_black=with_black)
+    new_code = do_compilation(file, has_absolute_imports=has_absolute_imports, with_black=with_black, strategy=strategy)
     if output is None:
         output = str(file).replace(".py", "_compiled.py")
     with Path(output).open("w") as f:

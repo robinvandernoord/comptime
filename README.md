@@ -33,6 +33,25 @@ development.
 
 **"Zig into Python's speed lane with Comptime – it's not a sprint; it's a compile!"**
 
+## :warning: Warning: this is only a proof-of-concept
+
+This code was only created to test the concept. It should NOT be used in a production environment, as I can not
+guarantee at this time that the semantics of the outputted code are correct.
+Furthermore, initial performance tests show that for relatively simple calculations, this does NOT actually improve
+performance:
+
+```bash
+python examples/perf.py # pre-comptime:
+# Function executed in: 2.0992 seconds total; avg of 209.92 ns. per execution.
+python examples/perf_match.py # comptime with match-case strategy:
+# Function executed in: 21.5824 seconds total; avg of 2158.24 ns. per execution.
+python examples/perf_dict.py # comptime with dict lookup strategy:
+# Function executed in: 152.4098 seconds total; avg of 15240.98 ns. per execution.
+```
+
+While this package could be useful in cases where the calculation is actually heavy, it could also negatively impact
+your performance!
+
 ## Installation
 
 ```console
