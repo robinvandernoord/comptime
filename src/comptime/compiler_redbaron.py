@@ -8,10 +8,11 @@ import sys
 import textwrap
 import typing
 from pathlib import Path
+from xml.dom.minicompat import NodeList
 
 import black
 import black.mode
-from redbaron import RedBaron, Node, DecoratorNode
+from redbaron import RedBaron, Node, DecoratorNode, StringNode
 
 from .core import ENV_KEY
 from .types import DynamicTuple, Registration, ResultsDictType
@@ -142,6 +143,17 @@ class TransformComptimeRedBaron:
             return True
         return False
 
+    def get_docstring(self, function_def: Node) -> Node | None:
+        """
+        Get the docstring (object) of a function node.
+        """
+        if function_def.value:
+            # Check if the first statement is a string (which would be the docstring)
+            first_stmt = function_def.value[0]
+            if isinstance(first_stmt, StringNode):
+                return first_stmt
+        return None
+
     def remove_comptime_decorators(self, node: Node):
         # Remove the @comptime decorator(s) if present
         decos: list[DecoratorNode] = node.decorators
@@ -190,24 +202,107 @@ class TransformComptimeRedBaron:
         for node in nodes_to_remove:
             self.remove_node(node)
 
+    def _add_fallback_case(self, arg_names: list[str], cases: RedBaron) -> None:
+        args_fstring_elements = []
+
+        for arg_name in arg_names:
+            # Append formatted string elements
+            args_fstring_elements.append(RedBaron(f"'{arg_name}='"))
+            args_fstring_elements.append(RedBaron(f"FormattedValue(Name('{arg_name}'))"))
+            args_fstring_elements.append(RedBaron("' '"))
+
+        # Removing the trailing space
+        del args_fstring_elements[-1]
+
+        # Construct the error message
+        error_message = f"JoinedStr(['Uncompiled variant ', {' + '.join([elem.dumps() for elem in args_fstring_elements])}])"
+
+        # Construct the fallback match case
+        fallback_case = RedBaron(f"""match_case(pattern=MatchAs(name=None), body=[
+            Raise(exc=Call(func=Name("ValueError"), args=[{error_message}]))
+        ])""")
+
+        cases.append(fallback_case)
+
+    def _build_match_cases(self, function_name: str, arg_names: list[str]):
+        literals_map = {arg_name: set() for arg_name in arg_names}
+        cases = []
+
+        for key, value in self.replacements.items():
+            if isinstance(key, tuple) and key[0] == function_name:
+                if isinstance(key[1], tuple):
+                    for idx, literal_value in enumerate(key[1]):
+                        literals_map[arg_names[idx]].add(literal_value)
+                else:
+                    literals_map[arg_names[0]].add(key[1])
+
+                # Building the patterns
+                patterns = (
+                    [f"MatchValue(value=Constant(value={literal}))" for literal in key[1]]
+                    if isinstance(key[1], tuple)
+                    else [f"MatchValue(value=Constant(value={key[1]}))"]
+                )
+
+                pattern_string = (
+                    f"Tuple(elts={patterns}, ctx=Load())" if len(patterns) > 1 else patterns[0]
+                )
+
+                # Create nodes using RedBaron
+                pattern_node = RedBaron(pattern_string)[0]
+                return_stmt_node = RedBaron(f"Return(value=Constant(value={value}))")[0]
+
+                match_case_node = RedBaron("case _:\n    pass")[0]  # This is a simple way to get a match_case node
+                match_case_node.pattern = pattern_node  # Assuming pattern is already a redbaron node or a proper string
+                match_case_node.body = NodeList([return_stmt_node])
+
+                cases.append(match_case_node)
+
+        # Add the default match case
+        self._add_fallback_case(arg_names, cases)
+        return cases, literals_map
+
+    def _generate_comptime_match_cases_and_annotations(self, arg_names: list[str], function_name: str, node: Node):
+        cases, literals = self._build_match_cases(function_name, arg_names)
+        self._build_argument_annotations(node, arg_names, literals)
+
     def transform_functions(self):
         for func_node in self.red.find_all("DefNode"):
             if not self.has_comptime_decorator(func_node):
                 continue
+
+            if docstring_node := self.get_docstring(func_node):
+                # Remove the docstring node from the function body to preserve it
+                docstring_node_index = func_node.value.index(docstring_node)
+                del func_node.value[docstring_node_index]
+
             function_name = func_node.name
-            if function_name in self.replacements:
-                # Replace the function content as per your logic
-                # You can make use of self.replacements[function_name]
-                pass
-            # Extend with other transformations...
+            arg_names = [arg.target.value for arg in func_node.arguments]
+
+            # If function name matches some criteria:
+            # The actual criteria aren't provided, so this is just a placeholder
+            if any(isinstance(key, tuple) and key[0] == function_name for key in self.replacements):
+                # Logic for self._generate_comptime_match_cases_and_annotations goes here
+                self._generate_comptime_match_cases_and_annotations(arg_names, function_name, func_node)
+            else:
+                # Replace the body with a return statement from the replacements dict
+                # Note: This assumes that replacements is a dictionary where the key is a function name and the value is what you wish to return
+                return_value = self.replacements.get(function_name, None) # todo: return None should be possible!
+                if return_value is not None:
+                    return_stmt = RedBaron(f'return {return_value}')[0]
+                    del func_node.value[:]  # clear old body
+                    func_node.value.insert(0, return_stmt)
+
+            # Add back the docstring if it was present
+            if docstring_node:
+                func_node.value.insert(0, docstring_node)
 
 
 def transform_code(code, replacements):
     transformer = TransformComptimeRedBaron(code, replacements)
 
+    transformer.transform_functions()
     transformer.add_typing_import()
     transformer.walk_nodelist()
-    transformer.transform_functions()
 
     return transformer.red.dumps()
 

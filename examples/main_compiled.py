@@ -1,4 +1,8 @@
+"""
+This is an example file with relative imports.
+"""
 import typing
+
 from .secondary import add
 
 
@@ -6,7 +10,7 @@ from .secondary import add
 
 
 def expensive_computation():
-    return add(2, 3)
+    return 5
 
 
 def with_predefined_arg(arg1):
@@ -27,3 +31,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -20,9 +20,7 @@ def expensive_computation() -> int:
     """
     Really expensive
     """
-    side_effect("expensive_computation")
-    side_effect2()
-    return add(2, 3)
+    return 5
 
 
 def with_predefined_arg(arg1) -> str:
@@ -57,3 +55,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
